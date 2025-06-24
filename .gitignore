@@ -1,0 +1,59 @@
+# Node dependencies
+node_modules/
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment variables
+.env
+.env.*.local
+.env.local
+
+# Output folders
+dist/
+build/
+out/
+.tmp/
+.cache/
+coverage/
+
+# TypeScript compiled files
+*.tsbuildinfo
+*.js
+*.js.map
+*.d.ts
+
+# VS Code config
+.vscode/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# IDEs
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Misc
+*.tgz
+*.swp
+*.bak
+*.old
+*.orig
+
+# Git metadata backups
+*.orig
