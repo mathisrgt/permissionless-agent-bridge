@@ -1,6 +1,16 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.28;
 
+interface IERC20 {
+    function transfer(address to, uint256 amount) external returns (bool);
+
+    function transferFrom(
+        address from,
+        address to,
+        uint256 amount
+    ) external returns (bool);
+}
+
 struct Agent {
     bytes32 xrplAddress;
     uint256 depositAmount;
@@ -37,9 +47,25 @@ contract PAB_Gateway {
         uint256 amount,
         uint256 destinationChain
     );
-    event BridgeConfirmed(address indexed agent, bytes32 indexed xrplTxHash, address indexed user, uint256 amount, uint256 destinationChain);
-    event ForcedReceiveInitiated(address indexed user, uint256 amount, uint256 destinationChain, address indexed agent);
-    event ForcedReceiveApproved(address indexed user, uint256 amount, uint256 destinationChain, address indexed agent);
+    event BridgeConfirmed(
+        address indexed agent,
+        bytes32 indexed xrplTxHash,
+        address indexed user,
+        uint256 amount,
+        uint256 destinationChain
+    );
+    event ForcedReceiveInitiated(
+        address indexed user,
+        uint256 amount,
+        uint256 destinationChain,
+        address indexed agent
+    );
+    event ForcedReceiveApproved(
+        address indexed user,
+        uint256 amount,
+        uint256 destinationChain,
+        address indexed agent
+    );
     event FallbackReceived(address indexed sender, uint256 amount);
 
     modifier onlyOwner() {
@@ -100,80 +126,136 @@ contract PAB_Gateway {
         emit DepositAgent(msg.sender, msg.value);
     }
 
-    function bridgeTokens(
-        uint256 amount,
-        uint256 destinationChain
-    ) public payable {
-        // + verify approval 
-        require(atomicBridge[msg.sender].amount == 0 || atomicBridge[msg.sender].xrplTxHash != 0, "Previous atomic bridge not completed");
-        
+    function bridgeTokens(uint256 amount, uint256 destinationChain) public {
+        require(
+            atomicBridge[msg.sender].amount == 0 ||
+                atomicBridge[msg.sender].xrplTxHash != 0,
+            "Previous atomic bridge not completed"
+        );
+
+        require(
+            IERC20(xrpContract).transferFrom(msg.sender, address(this), amount),
+            "Token transfer failed"
+        );
+
         atomicBridge[msg.sender] = AtomicBridge({
             amount: amount,
             destinationChain: destinationChain,
             claimedBlock: 0,
-            agentAddress: address(0), // This will be set later when the agent will claim the bridge
-            xrplTxHash: 0, // This will be set later when the XRPL transaction is confirmed
+            agentAddress: address(0),
+            xrplTxHash: 0,
             requestedForceReceive: false,
             forceReceived: false
-            
         });
+
         emit BridgeRequested(msg.sender, amount, destinationChain);
     }
 
     function claimBridge(address user) public onlyActiveAgent {
-        // register the agent in the atomic bridge
         atomicBridge[user].agentAddress = msg.sender;
         atomicBridge[user].claimedBlock = block.number;
-        // transfer the xrp amount to the agent
+
+        require(
+            IERC20(xrpContract).transfer(msg.sender, atomicBridge[user].amount),
+            "Token payout failed"
+        );
 
         emit BridgeClaimed(
-            msg.sender, // agent address
-            user, // user address
-            atomicBridge[msg.sender].amount,
-            atomicBridge[msg.sender].destinationChain
+            msg.sender,
+            user,
+            atomicBridge[user].amount,
+            atomicBridge[user].destinationChain
         );
     }
 
-    function confirmBridge(address user, bytes32 xrplTxHash) public onlyActiveAgent {
-        require(atomicBridge[user].agentAddress == msg.sender, "Not authorized agent");
-        require(atomicBridge[user].xrplTxHash != 0, "Already confirmed");
+    function confirmBridge(
+        address user,
+        bytes32 xrplTxHash
+    ) public onlyActiveAgent {
+        require(
+            atomicBridge[user].agentAddress == msg.sender,
+            "Not authorized agent"
+        );
+        require(atomicBridge[user].xrplTxHash == 0, "Already confirmed");
         atomicBridge[user].xrplTxHash = xrplTxHash;
-        emit BridgeConfirmed(msg.sender, xrplTxHash, user, atomicBridge[user].amount, atomicBridge[user].destinationChain);
+        emit BridgeConfirmed(
+            msg.sender,
+            xrplTxHash,
+            user,
+            atomicBridge[user].amount,
+            atomicBridge[user].destinationChain
+        );
     }
 
     function forceReceive() public {
-        require(atomicBridge[msg.sender].amount != 0, "No atomic bridge request");
-        require(atomicBridge[msg.sender].agentAddress != address(0), "Agent not set");
-        require(block.number < atomicBridge[msg.sender].claimedBlock + 20, "Cannot force receive yet");
-        require(atomicBridge[msg.sender].requestedForceReceive, "Already requested force receive");
-        
+        require(
+            atomicBridge[msg.sender].amount != 0,
+            "No atomic bridge request"
+        );
+        require(
+            atomicBridge[msg.sender].agentAddress != address(0),
+            "Agent not set"
+        );
+        require(
+            block.number >= atomicBridge[msg.sender].claimedBlock + 20,
+            "Cannot force receive yet"
+        );
+        require(
+            atomicBridge[msg.sender].requestedForceReceive,
+            "Already requested force receive"
+        );
+
         atomicBridge[msg.sender].requestedForceReceive = true;
-        
-        if(block.number >= atomicBridge[msg.sender].claimedBlock + TIMEOUT_BLOCKS) {
+
+        if (
+            block.number >=
+            atomicBridge[msg.sender].claimedBlock + TIMEOUT_BLOCKS
+        ) {
             atomicBridge[msg.sender].forceReceived = true;
-            // remove the amount from the agent deposit
-            // send xrp tokens to the user
-            emit ForcedReceiveApproved(msg.sender, atomicBridge[msg.sender].amount, atomicBridge[msg.sender].destinationChain, atomicBridge[msg.sender].agentAddress);
+
+            require(
+                IERC20(xrpContract).transfer(msg.sender, atomicBridge[msg.sender].amount),
+                "Token refund failed"
+            );
+
+            emit ForcedReceiveApproved(
+                msg.sender,
+                atomicBridge[msg.sender].amount,
+                atomicBridge[msg.sender].destinationChain,
+                atomicBridge[msg.sender].agentAddress
+            );
         } else {
-            emit ForcedReceiveInitiated(msg.sender, atomicBridge[msg.sender].amount, atomicBridge[msg.sender].destinationChain, atomicBridge[msg.sender].agentAddress);
+            emit ForcedReceiveInitiated(
+                msg.sender,
+                atomicBridge[msg.sender].amount,
+                atomicBridge[msg.sender].destinationChain,
+                atomicBridge[msg.sender].agentAddress
+            );
         }
     }
 
     function approveForcedReceive(address user) public onlyOwner {
         require(atomicBridge[user].amount != 0, "No atomic bridge request");
         require(atomicBridge[user].agentAddress != address(0), "Agent not set");
-        require(!atomicBridge[user].requestedForceReceive, "No requested force receive");
-        require(atomicBridge[user].forceReceived, "Already force received");
+        require(
+            atomicBridge[user].requestedForceReceive,
+            "No force receive request"
+        );
+        require(!atomicBridge[user].forceReceived, "Already force received");
 
-        atomicBridge[msg.sender].forceReceived = true;
-        // remove the amount from the agent deposit
-        // send xrp tokens to the user
+        atomicBridge[user].forceReceived = true;
 
-        emit ForcedReceiveApproved(user, atomicBridge[msg.sender].amount, atomicBridge[msg.sender].destinationChain, atomicBridge[msg.sender].agentAddress);
-    }
+        // Refund tokens to user
+        require(
+            IERC20(xrpContract).transfer(user, atomicBridge[user].amount),
+            "Token refund failed"
+        );
 
-    receive() external payable {
-        emit FallbackReceived(msg.sender, msg.value);
-        payable(msg.sender).transfer(msg.value); // auto-return any direct funds
+        emit ForcedReceiveApproved(
+            user,
+            atomicBridge[user].amount,
+            atomicBridge[user].destinationChain,
+            atomicBridge[user].agentAddress
+        );
     }
 }
