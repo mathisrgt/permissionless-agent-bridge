@@ -1,64 +1,179 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.28;
 
-// Uncomment this line to use console.log
-// import "hardhat/console.sol";
+struct Agent {
+    bytes32 xrplAddress;
+    uint256 depositAmount;
+    uint256 lastDepositBlock;
+}
+
+struct AtomicBridge {
+    uint256 amount;
+    uint256 destinationChain; // 0 for XRPL, 56 for BSC, 8453 for Base
+    uint256 claimedBlock; // After 20 blocks, the user can forceReceive
+    address agentAddress;
+    bytes32 xrplTxHash; // Hash of the XRPL transaction - used for confirmation
+    bool requestedForceReceive; // Indicates if the user has requested a force receive
+    bool forceReceived; // Indicates if the user has requested a force receive
+}
 
 contract PAB_Gateway {
-    uint public unlockTime;
     address payable public owner;
+    address public xrpContract;
+    mapping(address => Agent) public agents;
+    mapping(address => AtomicBridge) public atomicBridge; // user address => atomic bridge details
+    uint256 TIMEOUT_BLOCKS = 20; // Number of blocks after which a user can force receive
 
-    event Withdrawal(uint amount, uint when);
+    event DepositAgent(address indexed agentAddress, uint256 depositAmount);
+    event Withdrawal(address indexed from, uint256 amount);
+    event BridgeRequested(
+        address indexed user,
+        uint256 amount,
+        uint256 destinationChain
+    );
+    event BridgeClaimed(
+        address indexed agent,
+        address indexed user,
+        uint256 amount,
+        uint256 destinationChain
+    );
+    event BridgeConfirmed(address indexed agent, bytes32 indexed xrplTxHash, address indexed user, uint256 amount, uint256 destinationChain);
+    event ForcedReceiveInitiated(address indexed user, uint256 amount, uint256 destinationChain, address indexed agent);
+    event ForcedReceiveApproved(address indexed user, uint256 amount, uint256 destinationChain, address indexed agent);
+    event FallbackReceived(address indexed sender, uint256 amount);
 
-    constructor(uint _unlockTime) payable {
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Not owner");
+        _;
+    }
+
+    modifier onlyActiveAgent() {
         require(
-            block.timestamp < _unlockTime,
-            "Unlock time should be in the future"
+            agents[msg.sender].depositAmount > 100,
+            "Invalid agent or insufficient deposit"
         );
 
-        unlockTime = _unlockTime;
+        _;
+    }
+
+    constructor(address _xrpContract) payable {
         owner = payable(msg.sender);
+        xrpContract = _xrpContract;
     }
 
     function withdraw() public {
-        // if owner withdraw all the funds
-        // if agents, withdraw its deposit and remove him from the agent list
+        if (msg.sender == owner) {
+            uint256 amount = address(this).balance;
+            owner.transfer(amount);
+            emit Withdrawal(msg.sender, amount);
+        } else if (agents[msg.sender].depositAmount > 0) {
+            uint256 refund = agents[msg.sender].depositAmount;
+            agents[msg.sender].depositAmount = 0;
+            payable(msg.sender).transfer(refund);
+            emit Withdrawal(msg.sender, refund);
+        }
     }
 
+    /**
+     * @param agentXrplAddress The XRPL address of the agent.
+     * @notice Allows agents to register with the contract by providing their XRPL address and a deposit.
+     */
     function register(bytes32 agentXrplAddress) public payable {
-        // deposit
-        // save the amount deposited and the corresponding xrpl address
+        require(msg.value > 0, "Deposit required");
+        agents[msg.sender] = Agent({
+            xrplAddress: agentXrplAddress,
+            depositAmount: msg.value,
+            lastDepositBlock: block.number
+        });
+        emit DepositAgent(msg.sender, msg.value);
     }
 
+    /**
+     * @notice Allows agents to deposit funds to the contract.
+     */
     function deposit() public payable {
-        // only if already registered
+        require(msg.value > 0, "Deposit required");
+        require(agents[msg.sender].depositAmount != 0, "Agent not registered");
+
+        agents[msg.sender].depositAmount += msg.value;
+        agents[msg.sender].lastDepositBlock = block.number;
+        emit DepositAgent(msg.sender, msg.value);
     }
 
-    function bridgeTokens(uint256 amount, uint256 destinationChain) public payable {
-        //emit an event
-    }
-
-    function claimBridge() public {
-        // verify if he is an allowed agent (deposited here, confirmed on other chains/blacklisted)
-    }
-
-    function confirmBridge(bytes32 xrplTxHash) public {
+    function bridgeTokens(
+        uint256 amount,
+        uint256 destinationChain
+    ) public payable {
+        // + verify approval 
+        require(atomicBridge[msg.sender].amount == 0 || atomicBridge[msg.sender].xrplTxHash != 0, "Previous atomic bridge not completed");
         
+        atomicBridge[msg.sender] = AtomicBridge({
+            amount: amount,
+            destinationChain: destinationChain,
+            claimedBlock: 0,
+            agentAddress: address(0), // This will be set later when the agent will claim the bridge
+            xrplTxHash: 0, // This will be set later when the XRPL transaction is confirmed
+            requestedForceReceive: false,
+            forceReceived: false
+            
+        });
+        emit BridgeRequested(msg.sender, amount, destinationChain);
+    }
+
+    function claimBridge(address user) public onlyActiveAgent {
+        // register the agent in the atomic bridge
+        atomicBridge[user].agentAddress = msg.sender;
+        atomicBridge[user].claimedBlock = block.number;
+        // transfer the xrp amount to the agent
+
+        emit BridgeClaimed(
+            msg.sender, // agent address
+            user, // user address
+            atomicBridge[msg.sender].amount,
+            atomicBridge[msg.sender].destinationChain
+        );
+    }
+
+    function confirmBridge(address user, bytes32 xrplTxHash) public onlyActiveAgent {
+        require(atomicBridge[user].agentAddress == msg.sender, "Not authorized agent");
+        require(atomicBridge[user].xrplTxHash != 0, "Already confirmed");
+        atomicBridge[user].xrplTxHash = xrplTxHash;
+        emit BridgeConfirmed(msg.sender, xrplTxHash, user, atomicBridge[user].amount, atomicBridge[user].destinationChain);
     }
 
     function forceReceive() public {
-        // describe the tx in param
-        // return funds if not confirmed after several blocks
-        // request a contest if confirmed
+        require(atomicBridge[msg.sender].amount != 0, "No atomic bridge request");
+        require(atomicBridge[msg.sender].agentAddress != address(0), "Agent not set");
+        require(block.number < atomicBridge[msg.sender].claimedBlock + 20, "Cannot force receive yet");
+        require(atomicBridge[msg.sender].requestedForceReceive, "Already requested force receive");
+        
+        atomicBridge[msg.sender].requestedForceReceive = true;
+        
+        if(block.number >= atomicBridge[msg.sender].claimedBlock + TIMEOUT_BLOCKS) {
+            atomicBridge[msg.sender].forceReceived = true;
+            // remove the amount from the agent deposit
+            // send xrp tokens to the user
+            emit ForcedReceiveApproved(msg.sender, atomicBridge[msg.sender].amount, atomicBridge[msg.sender].destinationChain, atomicBridge[msg.sender].agentAddress);
+        } else {
+            emit ForcedReceiveInitiated(msg.sender, atomicBridge[msg.sender].amount, atomicBridge[msg.sender].destinationChain, atomicBridge[msg.sender].agentAddress);
+        }
     }
 
-    function approveForcedReceive() public {
-        // return the funds to the requested address after verification of several blocks
+    function approveForcedReceive(address user) public onlyOwner {
+        require(atomicBridge[user].amount != 0, "No atomic bridge request");
+        require(atomicBridge[user].agentAddress != address(0), "Agent not set");
+        require(!atomicBridge[user].requestedForceReceive, "No requested force receive");
+        require(atomicBridge[user].forceReceived, "Already force received");
+
+        atomicBridge[msg.sender].forceReceived = true;
+        // remove the amount from the agent deposit
+        // send xrp tokens to the user
+
+        emit ForcedReceiveApproved(user, atomicBridge[msg.sender].amount, atomicBridge[msg.sender].destinationChain, atomicBridge[msg.sender].agentAddress);
     }
 
     receive() external payable {
-        // auto return the funds
+        emit FallbackReceived(msg.sender, msg.value);
+        payable(msg.sender).transfer(msg.value); // auto-return any direct funds
     }
-
-    function pause() public {}
 }
