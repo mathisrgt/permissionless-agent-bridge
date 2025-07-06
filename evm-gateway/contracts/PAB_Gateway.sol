@@ -9,9 +9,9 @@ interface IERC20 {
         address to,
         uint256 amount
     ) external returns (bool);
-}
+} // To be imported from openzep
 
-struct Agent {
+struct Agent { // Delegator
     bytes32 xrplAddress;
     uint256 depositAmount;
     uint256 lastDepositBlock;
@@ -27,7 +27,7 @@ struct AtomicBridge {
     bool forceReceived; // Indicates if the user has requested a force receive
 }
 
-contract PAB_Gateway {
+contract PAB_Gateway { // is OApp - use layerzero for evm bridge with a lock and release process
     address payable public owner;
     address public xrpContract;
     mapping(address => Agent) public agents;
@@ -245,7 +245,6 @@ contract PAB_Gateway {
 
         atomicBridge[user].forceReceived = true;
 
-        // Refund tokens to user
         require(
             IERC20(xrpContract).transfer(user, atomicBridge[user].amount),
             "Token refund failed"
