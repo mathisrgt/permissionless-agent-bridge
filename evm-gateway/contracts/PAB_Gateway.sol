@@ -1,17 +1,9 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.28;
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-interface IERC20 {
-    function transfer(address to, uint256 amount) external returns (bool);
-
-    function transferFrom(
-        address from,
-        address to,
-        uint256 amount
-    ) external returns (bool);
-} // To be imported from openzep
-
-struct Agent { // Delegator
+struct Agent {
+    // Delegator
     bytes32 xrplAddress;
     uint256 depositAmount;
     uint256 lastDepositBlock;
@@ -27,12 +19,18 @@ struct AtomicBridge {
     bool forceReceived; // Indicates if the user has requested a force receive
 }
 
-contract PAB_Gateway { // is OApp - use layerzero for evm bridge with a lock and release process
+contract PAB_Gateway {
+    // The gateway will be an oapp to: share the agent and user data, lock and release token for evm bridges
+    using SafeERC20 for IERC20;
+
     address payable public owner;
     address public xrpContract;
     mapping(address => Agent) public agents;
     mapping(address => AtomicBridge) public atomicBridge; // user address => atomic bridge details
     uint256 TIMEOUT_BLOCKS = 20; // Number of blocks after which a user can force receive
+
+    // Supported chains management
+    uint256[] public supportedChains;
 
     event DepositAgent(address indexed agentAddress, uint256 depositAmount);
     event Withdrawal(address indexed from, uint256 amount);
@@ -67,6 +65,8 @@ contract PAB_Gateway { // is OApp - use layerzero for evm bridge with a lock and
         address indexed agent
     );
     event FallbackReceived(address indexed sender, uint256 amount);
+    event ChainAdded(uint256 indexed chainId);
+    event ChainRemoved(uint256 indexed chainId);
 
     modifier onlyOwner() {
         require(msg.sender == owner, "Not owner");
@@ -82,48 +82,70 @@ contract PAB_Gateway { // is OApp - use layerzero for evm bridge with a lock and
         _;
     }
 
-    constructor(address _xrpContract) payable {
+    constructor(address _xrpContract) {
         owner = payable(msg.sender);
         xrpContract = _xrpContract;
+
+        // Initialize with default supported chains
+        supportedChains.push(0); // XRPL
+        supportedChains.push(56); // BSC
+        supportedChains.push(8453); // Base
     }
 
     function withdraw() public {
         if (msg.sender == owner) {
-            uint256 amount = address(this).balance;
-            owner.transfer(amount);
-            emit Withdrawal(msg.sender, amount);
+            uint256 balance = IERC20(xrpContract).balanceOf(address(this));
+            require(
+                IERC20(xrpContract).transfer(owner, balance),
+                "Owner withdrawal failed"
+            );
+            emit Withdrawal(msg.sender, balance);
         } else if (agents[msg.sender].depositAmount > 0) {
             uint256 refund = agents[msg.sender].depositAmount;
             agents[msg.sender].depositAmount = 0;
-            payable(msg.sender).transfer(refund);
+            require(
+                IERC20(xrpContract).transfer(msg.sender, refund),
+                "Agent withdrawal failed"
+            );
             emit Withdrawal(msg.sender, refund);
         }
     }
 
     /**
      * @param agentXrplAddress The XRPL address of the agent.
-     * @notice Allows agents to register with the contract by providing their XRPL address and a deposit.
+     * @param amount The amount of XRP tokens to deposit as collateral.
+     * @notice Allows agents to register with the contract by providing their XRPL address and a token deposit.
      */
-    function register(bytes32 agentXrplAddress) public payable {
-        require(msg.value > 0, "Deposit required");
+    function register(bytes32 agentXrplAddress, uint256 amount) public {
+        require(amount > 0, "Deposit required");
+        require(
+            IERC20(xrpContract).transferFrom(msg.sender, address(this), amount),
+            "Token deposit failed"
+        );
+
         agents[msg.sender] = Agent({
             xrplAddress: agentXrplAddress,
-            depositAmount: msg.value,
+            depositAmount: amount,
             lastDepositBlock: block.number
         });
-        emit DepositAgent(msg.sender, msg.value);
+        emit DepositAgent(msg.sender, amount);
     }
 
     /**
-     * @notice Allows agents to deposit funds to the contract.
+     * @param amount The amount of XRP tokens to deposit.
+     * @notice Allows agents to deposit additional funds to the contract.
      */
-    function deposit() public payable {
-        require(msg.value > 0, "Deposit required");
+    function deposit(uint256 amount) public {
+        require(amount > 0, "Deposit required");
         require(agents[msg.sender].depositAmount != 0, "Agent not registered");
+        require(
+            IERC20(xrpContract).transferFrom(msg.sender, address(this), amount),
+            "Token deposit failed"
+        );
 
-        agents[msg.sender].depositAmount += msg.value;
+        agents[msg.sender].depositAmount += amount;
         agents[msg.sender].lastDepositBlock = block.number;
-        emit DepositAgent(msg.sender, msg.value);
+        emit DepositAgent(msg.sender, amount);
     }
 
     function bridgeTokens(uint256 amount, uint256 destinationChain) public {
@@ -131,6 +153,11 @@ contract PAB_Gateway { // is OApp - use layerzero for evm bridge with a lock and
             atomicBridge[msg.sender].amount == 0 ||
                 atomicBridge[msg.sender].xrplTxHash != 0,
             "Previous atomic bridge not completed"
+        );
+
+        require(
+            isChainSupported(destinationChain),
+            "Destination chain not supported"
         );
 
         require(
@@ -214,7 +241,10 @@ contract PAB_Gateway { // is OApp - use layerzero for evm bridge with a lock and
             atomicBridge[msg.sender].forceReceived = true;
 
             require(
-                IERC20(xrpContract).transfer(msg.sender, atomicBridge[msg.sender].amount),
+                IERC20(xrpContract).transfer(
+                    msg.sender,
+                    atomicBridge[msg.sender].amount
+                ),
                 "Token refund failed"
             );
 
@@ -256,5 +286,69 @@ contract PAB_Gateway { // is OApp - use layerzero for evm bridge with a lock and
             atomicBridge[user].destinationChain,
             atomicBridge[user].agentAddress
         );
+    }
+
+    // ===== SUPPORTED CHAINS MANAGEMENT =====
+
+    /**
+     * @dev Add a new supported chain
+     * @param chainId The chain ID to add
+     */
+    function addSupportedChain(uint256 chainId) public onlyOwner {
+        require(!isChainSupported(chainId), "Chain already supported");
+        supportedChains.push(chainId);
+        emit ChainAdded(chainId);
+    }
+
+    /**
+     * @dev Remove a supported chain
+     * @param chainId The chain ID to remove
+     */
+    function removeSupportedChain(uint256 chainId) public onlyOwner {
+        require(isChainSupported(chainId), "Chain not supported");
+        require(chainId != 0, "Cannot remove XRPL chain");
+
+        // Find and remove the chain ID
+        for (uint256 i = 0; i < supportedChains.length; i++) {
+            if (supportedChains[i] == chainId) {
+                supportedChains[i] = supportedChains[
+                    supportedChains.length - 1
+                ];
+                supportedChains.pop();
+                break;
+            }
+        }
+
+        emit ChainRemoved(chainId);
+    }
+
+    /**
+     * @dev Check if a chain is supported
+     * @param chainId The chain ID to check
+     * @return bool indicating if the chain is supported
+     */
+    function isChainSupported(uint256 chainId) public view returns (bool) {
+        for (uint256 i = 0; i < supportedChains.length; i++) {
+            if (supportedChains[i] == chainId) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * @dev Get all supported chains
+     * @return Array of supported chain IDs
+     */
+    function getSupportedChains() public view returns (uint256[] memory) {
+        return supportedChains;
+    }
+
+    /**
+     * @dev Get the number of supported chains
+     * @return Number of supported chains
+     */
+    function getSupportedChainsCount() public view returns (uint256) {
+        return supportedChains.length;
     }
 }
