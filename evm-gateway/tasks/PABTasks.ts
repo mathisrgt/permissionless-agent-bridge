@@ -4,7 +4,7 @@ import "@nomicfoundation/hardhat-ethers";
 import "hardhat-deploy";
 import { formatUnits } from "ethers";
 
-task("deploy-wxrp", "Deploy WXRP (Wrapped XRP) token contract")
+task("deploywxrp", "Deploy WXRP (Wrapped XRP) token contract")
     .addOptionalParam("name", "Token name", "Wrapped XRP")
     .addOptionalParam("symbol", "Token symbol", "WXRP")
     .addOptionalParam("decimals", "Token decimals", "6")
@@ -64,7 +64,7 @@ task("deploy-wxrp", "Deploy WXRP (Wrapped XRP) token contract")
         return address;
     });
 
-task("deploy-gateway", "Deploy PAB_Gateway contract")
+task("deployGateway", "Deploy PAB_Gateway contract")
     .addParam("xrpContract", "Address of the XRP token contract")
     .setAction(async (taskArgs, hre: HardhatRuntimeEnvironment) => {
         const { ethers } = hre;
@@ -99,7 +99,7 @@ task("deploy-gateway", "Deploy PAB_Gateway contract")
     });
 
 // Agent registration
-task("register-agent", "Register as an agent")
+task("registerAgent", "Register as an agent")
     .addParam("gateway", "Gateway contract address")
     .addParam("xrplAddress", "XRPL address as hex string (32 bytes)")
     .addParam("amount", "Amount to deposit (in wei)")

@@ -3,13 +3,26 @@ import "@nomicfoundation/hardhat-toolbox-viem";
 import * as dotenv from "dotenv";
 import { baseRpcUrl } from "./environment/rpc";
 import { baseScanApiKey, privateKey } from "./environment/key";
+import "./tasks/PABTasks.ts";
 
 dotenv.config();
 
 const config: HardhatUserConfig = {
-  solidity: "0.8.28",
+  solidity: {
+    compilers: [
+      {
+        version: '0.8.28',
+        settings: {
+          optimizer: {
+            enabled: true,
+            runs: 200,
+          },
+        },
+      },
+    ],
+  },
   networks: {
-    holesky: {
+    baseSepolia: {
       url: baseRpcUrl,
       accounts: [privateKey],
     },
